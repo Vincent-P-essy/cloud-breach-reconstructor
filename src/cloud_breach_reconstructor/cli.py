@@ -6,7 +6,7 @@ import sys
 from pathlib import Path
 
 from .api import serve
-from .benchmark import benchmark
+from .benchmark import QUALITY_METRICS, benchmark
 from .engine import reconstruct
 from .errors import EvidenceError
 from .io import load_records, load_truth
@@ -86,12 +86,7 @@ def main(argv: list[str] | None = None) -> int:
             arguments.output.parent.mkdir(parents=True, exist_ok=True)
             arguments.output.write_text(text, encoding="utf-8")
         print(text, end="")
-        minimum = min(
-            result["metrics"]["causal_edge_precision"],
-            result["metrics"]["causal_edge_recall"],
-            result["metrics"]["attack_event_recall"],
-            result["metrics"]["technique_recall"],
-        )
+        minimum = min(result["metrics"][name] for name in QUALITY_METRICS)
         return 0 if result["deterministic"] and minimum >= arguments.fail_under else 3
     except (EvidenceError, OSError, ValueError) as error:
         print(json.dumps({"error": type(error).__name__, "message": str(error)}), file=sys.stderr)

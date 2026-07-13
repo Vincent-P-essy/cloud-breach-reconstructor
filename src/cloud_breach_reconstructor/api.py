@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import socket
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from importlib import resources
@@ -13,10 +14,14 @@ from .errors import EvidenceError
 from .io import decode_json, load_records
 
 MAX_BODY_BYTES = 5_000_000
+REQUEST_TIMEOUT_SECONDS = 10
 
 
 class ApiHandler(BaseHTTPRequestHandler):
     server_version = "cloud-breach-reconstructor"
+
+    def version_string(self) -> str:
+        return self.server_version
 
     def log_message(self, format: str, *args: object) -> None:
         del format, args
@@ -41,7 +46,9 @@ class ApiHandler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def _json(self, status: int, value: Any) -> None:
-        body = (json.dumps(value, sort_keys=True, ensure_ascii=False) + "\n").encode()
+        body = (
+            json.dumps(value, sort_keys=True, ensure_ascii=False, allow_nan=False) + "\n"
+        ).encode()
         self._bytes(status, body, "application/json; charset=utf-8")
 
     def _error(self, status: int, code: str, message: str) -> None:
@@ -69,15 +76,25 @@ class ApiHandler(BaseHTTPRequestHandler):
                     "status": "ok",
                     "engine": "deterministic-v1",
                     "llm_used_for_causality": False,
-                    "schema_version": "1.0",
+                    "schema_version": "1.1",
                 },
             )
             return
         if path == "/api/v1/demo":
-            demo = Path(os.environ.get("CLOUD_BREACH_DEMO", "datasets/lab/events.jsonl"))
             try:
-                self._json(HTTPStatus.OK, reconstruct(load_records(demo)).to_dict())
-            except EvidenceError as error:
+                configured = os.environ.get("CLOUD_BREACH_DEMO")
+                if configured:
+                    records = load_records(Path(configured))
+                else:
+                    asset = (
+                        resources.files("cloud_breach_reconstructor")
+                        .joinpath("data")
+                        .joinpath("lab-events.jsonl")
+                    )
+                    with resources.as_file(asset) as demo:
+                        records = load_records(demo)
+                self._json(HTTPStatus.OK, reconstruct(records).to_dict())
+            except (EvidenceError, OSError, UnicodeError) as error:
                 self._error(HTTPStatus.NOT_FOUND, "demo_unavailable", str(error))
             return
         self._error(HTTPStatus.NOT_FOUND, "not_found", "route does not exist")
@@ -112,10 +129,22 @@ class ApiHandler(BaseHTTPRequestHandler):
             self._json(HTTPStatus.OK, reconstruct(events).to_dict())
         except (UnicodeDecodeError, EvidenceError) as error:
             self._error(HTTPStatus.BAD_REQUEST, "invalid_evidence", str(error))
+        except TimeoutError:
+            self._error(HTTPStatus.REQUEST_TIMEOUT, "request_timeout", "request body timed out")
 
 
-def create_server(host: str, port: int) -> ThreadingHTTPServer:
-    return ThreadingHTTPServer((host, port), ApiHandler)
+class ApiServer(ThreadingHTTPServer):
+    daemon_threads = True
+    request_queue_size = 64
+
+    def get_request(self) -> tuple[socket.socket, Any]:
+        request, address = super().get_request()
+        request.settimeout(REQUEST_TIMEOUT_SECONDS)
+        return request, address
+
+
+def create_server(host: str, port: int) -> ApiServer:
+    return ApiServer((host, port), ApiHandler)
 
 
 def serve(host: str, port: int) -> None:

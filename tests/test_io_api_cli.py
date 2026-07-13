@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import http.client
+import io
 import json
 import os
 import subprocess
@@ -8,9 +9,12 @@ import sys
 import tempfile
 import threading
 import unittest
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
+from unittest.mock import patch
 
 from cloud_breach_reconstructor.api import create_server
+from cloud_breach_reconstructor.cli import main
 from cloud_breach_reconstructor.errors import EvidenceError, InputLimitError
 from cloud_breach_reconstructor.io import decode_json, load_records, load_truth
 
@@ -52,6 +56,15 @@ class IoApiCliTests(unittest.TestCase):
                 decode_json('{"a":1,"a":2}')
             with self.assertRaises(EvidenceError):
                 decode_json("{")
+            with self.assertRaises(EvidenceError):
+                load_truth(root / "missing-truth.json")
+
+    def test_json_numbers_and_depth_fail_closed(self) -> None:
+        for text in ("NaN", "Infinity", "-Infinity", "1e400"):
+            with self.subTest(text=text), self.assertRaises(EvidenceError):
+                decode_json(text)
+        with self.assertRaises(EvidenceError):
+            decode_json("[" * 65 + "0" + "]" * 65)
 
     def test_loader_file_and_line_limits(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -102,6 +115,8 @@ class IoApiCliTests(unittest.TestCase):
                 self.assertIn("default-src 'self'", headers["Content-Security-Policy"])
         value = json.loads(self._request("GET", "/api/v1/health")[2])
         self.assertFalse(value["llm_used_for_causality"])
+        self.assertEqual("1.1", value["schema_version"])
+        self.assertNotIn("Python", self._request("GET", "/api/v1/health")[1]["Server"])
 
     def test_demo_and_not_found(self) -> None:
         previous = os.environ.get("CLOUD_BREACH_DEMO")
@@ -117,6 +132,20 @@ class IoApiCliTests(unittest.TestCase):
                 os.environ["CLOUD_BREACH_DEMO"] = previous
         self.assertEqual(404, self._request("GET", "/missing")[0])
         self.assertEqual(404, self._request("POST", "/missing", b"{}")[0])
+
+    def test_packaged_demo_is_independent_of_working_directory(self) -> None:
+        previous_demo = os.environ.pop("CLOUD_BREACH_DEMO", None)
+        previous_directory = Path.cwd()
+        try:
+            with tempfile.TemporaryDirectory() as directory:
+                os.chdir(directory)
+                status, _, payload = self._request("GET", "/api/v1/demo")
+            self.assertEqual(200, status)
+            self.assertEqual(21, len(json.loads(payload)["events"]))
+        finally:
+            os.chdir(previous_directory)
+            if previous_demo is not None:
+                os.environ["CLOUD_BREACH_DEMO"] = previous_demo
 
     def test_demo_unavailable(self) -> None:
         previous = os.environ.get("CLOUD_BREACH_DEMO")
@@ -147,6 +176,23 @@ class IoApiCliTests(unittest.TestCase):
                 self.assertEqual(
                     wanted, self._request("POST", "/api/v1/reconstruct", candidate, media)[0]
                 )
+
+    def test_reconstruct_endpoint_rejects_non_finite_deep_and_unknown_schema(self) -> None:
+        unknown_schema = canonical("a", "2026-07-12T10:00:00Z")
+        unknown_schema["schema_version"] = "999"
+        unknown_outcome = canonical("b", "2026-07-12T10:00:00Z")
+        unknown_outcome["outcome"] = "made-up"
+        bodies = [
+            b'{"events":[{"score":NaN}]}',
+            ("[" * 70 + "0" + "]" * 70).encode(),
+            json.dumps({"events": [unknown_schema]}).encode(),
+            json.dumps({"events": [unknown_outcome]}).encode(),
+        ]
+        for body in bodies:
+            with self.subTest(body=body[:80]):
+                status, _, payload = self._request("POST", "/api/v1/reconstruct", body)
+                self.assertEqual(400, status)
+                self.assertEqual("invalid_evidence", json.loads(payload)["error"]["code"])
 
     def test_cli_validate_analyze_benchmark_and_error(self) -> None:
         env = dict(os.environ)
@@ -193,7 +239,19 @@ class IoApiCliTests(unittest.TestCase):
     def test_cli_threshold_failure(self) -> None:
         env = dict(os.environ)
         env["PYTHONPATH"] = str(ROOT / "src")
-        truth = {"causal_edges": [{"source": "missing", "target": "also-missing"}]}
+        truth = {
+            "schema_version": "1.1",
+            "causal_edges": [
+                {
+                    "source": "missing",
+                    "target": "also-missing",
+                    "kind": "explicit-parent",
+                }
+            ],
+            "findings": [],
+            "attack_event_ids": [],
+            "techniques": [],
+        }
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "truth.json"
             path.write_text(json.dumps(truth), encoding="utf-8")
@@ -218,3 +276,86 @@ class IoApiCliTests(unittest.TestCase):
                 check=False,
             )
             self.assertEqual(3, result.returncode)
+
+    def test_cli_main_direct_paths(self) -> None:
+        evidence = ROOT / "datasets/lab/events.jsonl"
+        truth = ROOT / "datasets/lab/ground-truth.json"
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            output = root / "bundle"
+            summary_output = root / "summary-bundle"
+            benchmark_output = root / "benchmark.json"
+            empty_truth = root / "empty-truth.json"
+            empty_truth.write_text(
+                json.dumps(
+                    {
+                        "schema_version": "1.1",
+                        "causal_edges": [],
+                        "findings": [],
+                        "attack_event_ids": [],
+                        "techniques": [],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+            with redirect_stdout(stdout), redirect_stderr(stderr):
+                self.assertEqual(0, main(["validate", str(evidence)]))
+                self.assertEqual(
+                    0,
+                    main(
+                        [
+                            "analyze",
+                            str(evidence),
+                            "--output",
+                            str(output),
+                            "--stdout",
+                        ]
+                    ),
+                )
+                self.assertEqual(
+                    0,
+                    main(["analyze", str(evidence), "--output", str(summary_output)]),
+                )
+                self.assertEqual(
+                    0,
+                    main(
+                        [
+                            "benchmark",
+                            str(evidence),
+                            "--truth",
+                            str(truth),
+                            "--iterations",
+                            "1",
+                            "--output",
+                            str(benchmark_output),
+                            "--fail-under",
+                            "1.0",
+                        ]
+                    ),
+                )
+                self.assertEqual(2, main(["validate", str(root / "missing.json")]))
+                self.assertEqual(
+                    3,
+                    main(
+                        [
+                            "benchmark",
+                            str(evidence),
+                            "--truth",
+                            str(empty_truth),
+                            "--iterations",
+                            "1",
+                            "--fail-under",
+                            "1.0",
+                        ]
+                    ),
+                )
+                with patch("cloud_breach_reconstructor.cli.serve") as mocked_serve:
+                    self.assertEqual(0, main(["serve", "--host", "127.0.0.1", "--port", "0"]))
+                    mocked_serve.assert_called_once_with("127.0.0.1", 0)
+            self.assertTrue(output.is_dir())
+            self.assertTrue(summary_output.is_dir())
+            self.assertTrue(benchmark_output.is_file())
+            self.assertIn('"valid": true', stdout.getvalue())
+            self.assertIn("EvidenceError", stderr.getvalue())

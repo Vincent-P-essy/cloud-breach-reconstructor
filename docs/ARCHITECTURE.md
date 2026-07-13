@@ -2,31 +2,49 @@
 
 ## Trust boundaries
 
-Raw provider records are untrusted evidence. `io.py` bounds files and individual
-records, rejects duplicate JSON keys, and never evaluates record content. The
-normalizer converts only explicit schema fields into immutable canonical events
-and binds every record to a canonical SHA-256 digest.
+Provider records and normalized fixtures are untrusted evidence. `io.py` bounds
+files and lines, rejects duplicate keys, non-finite numbers and JSON deeper than
+64 levels. The normalizer accepts only the documented normalized schema and
+binds each record to a deterministic SHA-256 of its canonical JSON semantics.
+That digest is not represented as a hash of the original bytes.
 
 The inference engine is a pure in-process function. It has no network client,
 shell invocation, plugin loading, template evaluation, database, or mutable
-global state. Reports escape dashboard content before rendering; the HTTP layer
-adds CSP, frame, MIME, referrer, and no-store headers.
+global state. Dashboard values are HTML-escaped, DOT identifiers and labels are
+quoted, Markdown active content is neutralized, and CSV formula prefixes are
+made inert. The HTTP layer adds CSP, frame, MIME, referrer and no-store headers,
+removes the Python version banner, and applies body, depth and socket-time limits.
 
 ## Causal DAG
 
-Events are sorted by UTC timestamp and stable event ID. Each rule creates an edge
-only from an earlier event to a later event. A topological pass independently
-rejects cycles and references to missing evidence. Duplicate IDs with different
-raw hashes fail closed.
+Events are rendered in UTC timestamp/event-ID order, but event IDs never create
+causal precedence. An edge requires `source.timestamp < target.timestamp`; equal
+timestamps remain unordered. A topological pass independently rejects cycles,
+unknown evidence, reverse edges, and equal-time edges. Duplicate IDs with
+different canonical hashes fail closed.
 
-The engine conservatively connects the first use of newly issued credentials or
-workload identities, then relies on nearest-event session sequencing. This
-avoids a dense star from the issuer to every later use while retaining the
-credential boundary as explicit evidence.
+Request, session, credential, identity and resource correlations require a
+non-empty account scope. Request, credential and identity keys include provider
+and account, preventing tenant collisions. An explicit parent may cross those
+boundaries because it names the exact source event. Only successful events can
+register a resource mutation or newly issued credential/identity.
 
-## Output contract
+Each edge exposes its type, evidence, confidence, measured delta in milliseconds
+and maximum permitted delta. Explicit parent and first-use lineage are marked
+unbounded rather than pretending to have a time window.
 
-`Reconstruction` is the single source of truth. Markdown, CSV, DOT, API, and the
-dashboard are projections of that object. Every written artifact is listed in a
-SHA-256 manifest. The generation timestamp is excluded only from the benchmark's
-functional digest; it remains present in operational reports.
+## Incident boundary
+
+Correlation is context, not compromise. Only a deterministic finding seeds an
+incident; the connected causal component is then retained as explicit context.
+A benign session component with no finding produces no incident and contributes
+nothing to blast radius. ATT&CK mapping is also restricted to successful events.
+
+## Output and package contract
+
+`Reconstruction` schema 1.1 is the single source of truth. Markdown, CSV, DOT,
+API and dashboard responses are projections of that object. Written analysis
+artifacts are covered by a SHA-256 manifest. The generation timestamp is omitted
+only from the benchmark functional digest. The wheel embeds the inert lab events
+and ground truth under package resources; CI exercises the installed wheel from
+an unrelated working directory and runs the test suite from the source archive.

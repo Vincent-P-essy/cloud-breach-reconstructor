@@ -41,7 +41,7 @@ class CanonicalEvent:
     parent_event_id: str = ""
     account_id: str = ""
     attributes: dict[str, Any] = field(default_factory=dict)
-    raw_sha256: str = ""
+    canonical_record_sha256: str = ""
 
     def __post_init__(self) -> None:
         required = {
@@ -70,6 +70,8 @@ class CausalEdge:
     kind: str
     confidence: float
     evidence: tuple[str, ...]
+    time_delta_ms: int = 0
+    max_time_delta_ms: int | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -78,6 +80,8 @@ class CausalEdge:
             "kind": self.kind,
             "confidence": round(self.confidence, 4),
             "evidence": list(self.evidence),
+            "time_delta_ms": self.time_delta_ms,
+            "max_time_delta_ms": self.max_time_delta_ms,
         }
 
 

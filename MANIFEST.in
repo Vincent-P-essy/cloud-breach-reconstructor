@@ -1,0 +1,13 @@
+include LICENSE
+include README.md
+include SECURITY.md
+include CONTRIBUTING.md
+include Makefile
+include Dockerfile
+include compose.yaml
+include requirements-build.lock
+include requirements-dev.lock
+recursive-include datasets *.json *.jsonl *.sha256
+recursive-include docs *.md
+recursive-include scripts *.py
+recursive-include tests *.py

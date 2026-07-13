@@ -18,6 +18,7 @@ class Candidate:
     kind: str
     confidence: float
     evidence: tuple[str, ...]
+    maximum_delta: timedelta | None
 
     def edge(self) -> CausalEdge:
         return CausalEdge(
@@ -26,34 +27,33 @@ class Candidate:
             kind=self.kind,
             confidence=self.confidence,
             evidence=self.evidence,
+            time_delta_ms=round(
+                (self.target.timestamp - self.source.timestamp).total_seconds() * 1_000
+            ),
+            max_time_delta_ms=(
+                round(self.maximum_delta.total_seconds() * 1_000)
+                if self.maximum_delta is not None
+                else None
+            ),
         )
 
 
 def _before(left: CanonicalEvent, right: CanonicalEvent) -> bool:
-    return (left.timestamp, left.event_id) < (right.timestamp, right.event_id)
+    return left.timestamp < right.timestamp
 
 
 def _within(left: CanonicalEvent, right: CanonicalEvent, window: timedelta) -> bool:
     return _before(left, right) and right.timestamp - left.timestamp <= window
 
 
-def _nearest_predecessors(
-    events: tuple[CanonicalEvent, ...],
-    key: str,
-    getter: object,
-) -> dict[str, CanonicalEvent]:
-    del events, key, getter
-    return {}
-
-
 def infer_edges(events: tuple[CanonicalEvent, ...]) -> tuple[CausalEdge, ...]:
     """Infer a conservative temporal DAG from explicit, credential, and scoped correlations."""
     ordered = tuple(sorted(events, key=lambda event: (event.timestamp, event.event_id)))
     by_id = {event.event_id: event for event in ordered}
-    issued_credentials: dict[str, CanonicalEvent] = {}
-    issued_identities: dict[str, CanonicalEvent] = {}
+    issued_credentials: dict[tuple[str, str, str], CanonicalEvent] = {}
+    issued_identities: dict[tuple[str, str, str], CanonicalEvent] = {}
     last_session: dict[tuple[str, str, str], CanonicalEvent] = {}
-    last_request: dict[tuple[str, str], CanonicalEvent] = {}
+    last_request: dict[tuple[str, str, str], CanonicalEvent] = {}
     last_mutation: dict[tuple[str, str, str], CanonicalEvent] = {}
     selected: dict[tuple[str, str], Candidate] = {}
 
@@ -76,11 +76,13 @@ def infer_edges(events: tuple[CanonicalEvent, ...]) -> tuple[CausalEdge, ...]:
                         "explicit-parent",
                         1.0,
                         (f"parent_event_id={event.parent_event_id}", "strict timestamp precedence"),
+                        None,
                     )
                 )
 
-        if event.credential_id:
-            issuer = issued_credentials.pop(event.credential_id, None)
+        if event.credential_id and event.account_id:
+            credential_key = (event.provider, event.account_id, event.credential_id)
+            issuer = issued_credentials.pop(credential_key, None)
             if issuer is not None:
                 select(
                     Candidate(
@@ -92,10 +94,12 @@ def infer_edges(events: tuple[CanonicalEvent, ...]) -> tuple[CausalEdge, ...]:
                             f"issued_credential={event.credential_id}",
                             "credential observed in target",
                         ),
+                        None,
                     )
                 )
 
-        issuer = issued_identities.pop(event.actor, None)
+        identity_key = (event.provider, event.account_id, event.actor)
+        issuer = issued_identities.pop(identity_key, None) if event.account_id else None
         if issuer is not None:
             select(
                 Candidate(
@@ -104,11 +108,12 @@ def infer_edges(events: tuple[CanonicalEvent, ...]) -> tuple[CausalEdge, ...]:
                     "workload-identity-lineage",
                     0.97,
                     (f"issued_identity={event.actor}", "identity observed as target actor"),
+                    None,
                 )
             )
 
-        if event.request_id:
-            request_key = (event.provider, event.request_id)
+        if event.request_id and event.account_id:
+            request_key = (event.provider, event.account_id, event.request_id)
             predecessor = last_request.get(request_key)
             if predecessor is not None and _within(predecessor, event, REQUEST_WINDOW):
                 select(
@@ -117,12 +122,17 @@ def infer_edges(events: tuple[CanonicalEvent, ...]) -> tuple[CausalEdge, ...]:
                         event,
                         "request-correlation",
                         0.95,
-                        (f"request_id={event.request_id}", f"provider={event.provider}"),
+                        (
+                            f"request_id={event.request_id}",
+                            f"provider={event.provider}",
+                            f"account_id={event.account_id}",
+                        ),
+                        REQUEST_WINDOW,
                     )
                 )
             last_request[request_key] = event
 
-        if event.session_id:
+        if event.session_id and event.account_id:
             session_key = (event.provider, event.account_id, event.session_id)
             predecessor = last_session.get(session_key)
             if predecessor is not None and _within(predecessor, event, SESSION_WINDOW):
@@ -134,14 +144,15 @@ def infer_edges(events: tuple[CanonicalEvent, ...]) -> tuple[CausalEdge, ...]:
                         0.86,
                         (
                             f"session_id={event.session_id}",
-                            f"account_id={event.account_id or '<unknown>'}",
+                            f"account_id={event.account_id}",
                             "nearest prior event in bounded window",
                         ),
+                        SESSION_WINDOW,
                     )
                 )
             last_session[session_key] = event
 
-        if event.resource:
+        if event.resource and event.account_id:
             resource_key = (event.provider, event.account_id, event.resource)
             predecessor = last_mutation.get(resource_key)
             if predecessor is not None and _within(predecessor, event, RESOURCE_WINDOW):
@@ -152,18 +163,33 @@ def infer_edges(events: tuple[CanonicalEvent, ...]) -> tuple[CausalEdge, ...]:
                         "resource-lineage",
                         0.88,
                         (f"resource={event.resource}", "prior mutation followed by resource use"),
+                        RESOURCE_WINDOW,
                     )
                 )
             action = event.action.casefold()
-            if any(term in action for term in ("create", "update", "write", "put", "deploy")):
+            if event.outcome == "success" and any(
+                term in action for term in ("create", "update", "write", "put", "deploy")
+            ):
                 last_mutation[resource_key] = event
 
         issued_credential = event.attributes.get("issued_credential")
-        if isinstance(issued_credential, str) and issued_credential:
-            issued_credentials[issued_credential] = event
+        if (
+            event.outcome == "success"
+            and isinstance(issued_credential, str)
+            and issued_credential
+            and event.account_id
+        ):
+            credential_key = (event.provider, event.account_id, issued_credential)
+            issued_credentials[credential_key] = event
         issued_identity = event.attributes.get("issued_identity")
-        if isinstance(issued_identity, str) and issued_identity:
-            issued_identities[issued_identity] = event
+        if (
+            event.outcome == "success"
+            and isinstance(issued_identity, str)
+            and issued_identity
+            and event.account_id
+        ):
+            identity_key = (event.provider, event.account_id, issued_identity)
+            issued_identities[identity_key] = event
 
     edges = [candidate.edge() for candidate in selected.values()]
     return tuple(sorted(edges, key=lambda edge: (edge.target, edge.source, edge.kind)))
@@ -176,7 +202,7 @@ def assert_dag(events: tuple[CanonicalEvent, ...], edges: tuple[CausalEdge, ...]
     for edge in edges:
         if edge.source not in timestamps or edge.target not in timestamps:
             raise AssertionError("edge references an unknown event")
-        if timestamps[edge.source] > timestamps[edge.target]:
+        if timestamps[edge.source] >= timestamps[edge.target]:
             raise AssertionError("causal edge violates timestamp precedence")
         graph[edge.source].append(edge.target)
         indegree[edge.target] += 1

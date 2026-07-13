@@ -6,11 +6,13 @@ from collections.abc import Mapping
 from typing import Any
 
 from .errors import EvidenceError
+from .json_safety import MAX_JSON_DEPTH, validate_json_value
 from .models import CanonicalEvent, parse_timestamp
 
 SUPPORTED_PROVIDERS = frozenset({"aws", "azure", "kubernetes", "normalized"})
 MAX_RECORD_BYTES = 1_000_000
 MAX_ATTRIBUTES = 128
+NORMALIZED_SCHEMA_VERSION = "1.0"
 
 
 def _text(value: Any) -> str:
@@ -26,18 +28,23 @@ def _mapping(value: Any) -> Mapping[str, Any]:
 
 
 def _canonical_bytes(record: Mapping[str, Any]) -> bytes:
+    validate_json_value(record, label="record", maximum_depth=MAX_JSON_DEPTH)
     try:
         value = json.dumps(
-            record, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+            record,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            allow_nan=False,
         ).encode()
-    except (TypeError, ValueError) as error:
+    except (RecursionError, TypeError, ValueError) as error:
         raise EvidenceError("record is not JSON serializable") from error
     if len(value) > MAX_RECORD_BYTES:
         raise EvidenceError(f"record exceeds {MAX_RECORD_BYTES} bytes")
     return value
 
 
-def _outcome(value: str, *, failed: bool = False) -> str:
+def _outcome(value: str, *, failed: bool = False, strict: bool = False) -> str:
     if failed:
         return "failure"
     lowered = value.casefold()
@@ -45,6 +52,18 @@ def _outcome(value: str, *, failed: bool = False) -> str:
         return "success"
     if lowered in {"failure", "failed", "error", "denied", "forbidden", "401", "403"}:
         return "failure"
+    if lowered.isdecimal():
+        status = int(lowered)
+        if 200 <= status < 300:
+            return "success"
+        if status >= 400:
+            return "failure"
+    if lowered in {"", "unknown"} and not strict:
+        return "unknown"
+    if lowered == "unknown":
+        return "unknown"
+    if strict:
+        raise EvidenceError(f"unsupported normalized outcome: {value!r}")
     return "unknown"
 
 
@@ -104,7 +123,7 @@ def _normalize_aws(record: Mapping[str, Any], digest: str) -> CanonicalEvent:
         credential_id=_text(identity.get("accessKeyId")),
         account_id=_text(record.get("recipientAccountId") or identity.get("accountId")),
         attributes=attributes,
-        raw_sha256=digest,
+        canonical_record_sha256=digest,
     )
 
 
@@ -145,7 +164,7 @@ def _normalize_azure(record: Mapping[str, Any], digest: str) -> CanonicalEvent:
         credential_id=_text(properties.get("credentialId")),
         account_id=_text(record.get("subscriptionId") or record.get("tenantId")),
         attributes=attributes,
-        raw_sha256=digest,
+        canonical_record_sha256=digest,
     )
 
 
@@ -191,7 +210,7 @@ def _normalize_kubernetes(record: Mapping[str, Any], digest: str) -> CanonicalEv
         parent_event_id=parent,
         account_id=_text(annotations.get("cloud.example/account-id")),
         attributes=attributes,
-        raw_sha256=digest,
+        canonical_record_sha256=digest,
     )
 
 
@@ -204,6 +223,12 @@ def _normalize_canonical(record: Mapping[str, Any], digest: str) -> CanonicalEve
     provider = _text(record.get("provider")).casefold()
     if provider not in SUPPORTED_PROVIDERS - {"normalized"}:
         raise EvidenceError(f"unsupported normalized provider: {provider!r}")
+    schema_version = _text(record.get("schema_version"))
+    if schema_version != NORMALIZED_SCHEMA_VERSION:
+        raise EvidenceError(
+            f"unsupported normalized schema_version: {schema_version!r}; "
+            f"expected {NORMALIZED_SCHEMA_VERSION!r}"
+        )
     return CanonicalEvent(
         event_id=_text(record.get("event_id")),
         timestamp=parse_timestamp(_text(record.get("timestamp"))),
@@ -212,7 +237,7 @@ def _normalize_canonical(record: Mapping[str, Any], digest: str) -> CanonicalEve
         actor=_text(record.get("actor")),
         action=_text(record.get("action")),
         resource=_text(record.get("resource")),
-        outcome=_outcome(_text(record.get("outcome"))),
+        outcome=_outcome(_text(record.get("outcome")), strict=True),
         session_id=_text(record.get("session_id")),
         request_id=_text(record.get("request_id")),
         source_ip=_text(record.get("source_ip")),
@@ -220,7 +245,7 @@ def _normalize_canonical(record: Mapping[str, Any], digest: str) -> CanonicalEve
         parent_event_id=_text(record.get("parent_event_id")),
         account_id=_text(record.get("account_id")),
         attributes=dict(attributes),
-        raw_sha256=digest,
+        canonical_record_sha256=digest,
     )
 
 

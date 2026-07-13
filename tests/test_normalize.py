@@ -24,7 +24,7 @@ class NormalizationTests(unittest.TestCase):
         event = normalize_record(canonical("n1", "2026-07-12T10:00:00Z"))
         self.assertEqual("n1", event.event_id)
         self.assertEqual("aws", event.provider)
-        self.assertEqual(64, len(event.raw_sha256))
+        self.assertEqual(64, len(event.canonical_record_sha256))
 
     def test_normalized_provider_and_attributes_are_bounded(self) -> None:
         with self.assertRaises(EvidenceError):
@@ -35,6 +35,22 @@ class NormalizationTests(unittest.TestCase):
             normalize_record(
                 canonical("n3", "2026-07-12T10:00:00Z", attributes={str(i): i for i in range(129)})
             )
+
+    def test_normalized_schema_outcome_numbers_and_depth_fail_closed(self) -> None:
+        invalid_records = [
+            canonical("schema", "2026-07-12T10:00:00Z", schema_version="999"),
+            canonical("outcome", "2026-07-12T10:00:00Z", outcome="made-up"),
+            canonical("number", "2026-07-12T10:00:00Z", attributes={"score": float("nan")}),
+        ]
+        nested: object = "leaf"
+        for _ in range(65):
+            nested = [nested]
+        invalid_records.append(
+            canonical("depth", "2026-07-12T10:00:00Z", attributes={"nested": nested})
+        )
+        for record in invalid_records:
+            with self.subTest(event_id=record["event_id"]), self.assertRaises(EvidenceError):
+                normalize_record(record)
 
     def test_missing_canonical_fields_and_outcome_fail(self) -> None:
         with self.assertRaises(EvidenceError):
@@ -177,6 +193,18 @@ class NormalizationTests(unittest.TestCase):
         event = normalize_record(raw)
         self.assertEqual("failure", event.outcome)
         self.assertEqual("audit-2:unknown", event.event_id)
+
+    def test_kubernetes_all_2xx_codes_are_successful(self) -> None:
+        raw = {
+            "auditID": "audit-204",
+            "stage": "ResponseComplete",
+            "stageTimestamp": "2026-07-12T10:00:00Z",
+            "verb": "delete",
+            "user": {"username": "user"},
+            "objectRef": {"resource": "pods", "name": "old"},
+            "responseStatus": {"code": 204},
+        }
+        self.assertEqual("success", normalize_record(raw).outcome)
 
     def test_unknown_format_and_non_serializable_record_fail(self) -> None:
         with self.assertRaises(EvidenceError):
