@@ -10,23 +10,20 @@ from typing import Any
 from .attack import ATTACK_KNOWLEDGE_DATE, techniques_for
 from .causal import assert_dag, infer_edges
 from .errors import EvidenceError, InputLimitError
-from .models import CanonicalEvent, Finding, Incident, Reconstruction, timestamp_text
+from .models import CanonicalEvent, CausalEdge, Finding, Incident, Reconstruction, timestamp_text
 from .normalize import normalize_record
 
 MAX_EVENTS = 50_000
-HIGH_RISK_ACTIONS = (
-    "createaccesskey",
-    "getsecret",
-    "secrets/read",
-    "create:pods",
-    "network:egress",
-    "stoplogging",
-)
+RECONSTRUCTION_SCHEMA_VERSION = "1.1"
 
 
 def _input_digest(records: list[Mapping[str, Any]]) -> str:
     canonical = json.dumps(
-        records, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+        records,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
     ).encode()
     return hashlib.sha256(canonical).hexdigest()
 
@@ -39,7 +36,10 @@ def normalize_records(records: Iterable[Mapping[str, Any]]) -> tuple[CanonicalEv
     for record in materialized:
         event = normalize_record(record)
         existing = events.get(event.event_id)
-        if existing is not None and existing.raw_sha256 != event.raw_sha256:
+        if (
+            existing is not None
+            and existing.canonical_record_sha256 != event.canonical_record_sha256
+        ):
             raise EvidenceError(f"conflicting evidence for event_id {event.event_id!r}")
         events[event.event_id] = event
     return tuple(sorted(events.values(), key=lambda item: (item.timestamp, item.event_id)))
@@ -55,11 +55,23 @@ def _findings(events: tuple[CanonicalEvent, ...]) -> tuple[Finding, ...]:
     actor_geo: dict[str, str] = {}
     actor_ips: dict[str, set[str]] = defaultdict(set)
     for event in events:
+        if event.outcome != "success":
+            continue
         geo_value = event.attributes.get("geo")
         geo = geo_value if isinstance(geo_value, str) else ""
         prior_geo = actor_geo.get(event.actor)
         known_ips = actor_ips[event.actor]
-        if prior_geo and geo and geo != prior_geo and event.source_ip not in known_ips:
+        normalized_action = event.action.casefold().replace(" ", "")
+        is_authentication = any(
+            term in normalized_action for term in ("consolelogin", "signin", "login")
+        )
+        if (
+            is_authentication
+            and prior_geo
+            and geo
+            and geo != prior_geo
+            and event.source_ip not in known_ips
+        ):
             event_ids = (event.event_id,)
             results.append(
                 Finding(
@@ -77,7 +89,7 @@ def _findings(events: tuple[CanonicalEvent, ...]) -> tuple[Finding, ...]:
         if event.source_ip:
             known_ips.add(event.source_ip)
 
-        action = event.action.casefold().replace(" ", "")
+        action = normalized_action
         event_ids = (event.event_id,)
         if "createaccesskey" in action or "credentials/write" in action:
             results.append(
@@ -100,10 +112,13 @@ def _findings(events: tuple[CanonicalEvent, ...]) -> tuple[Finding, ...]:
                     event_ids,
                     "a secrets service returned or exposed secret material",
                     0.96,
-                    ("T1555",),
+                    ("T1555.006",),
                 )
             )
         if event.attributes.get("privileged") is True:
+            finding_techniques: tuple[str, ...] = ("T1610",)
+            if "T1611" in techniques_for(event):
+                finding_techniques = ("T1610", "T1611")
             results.append(
                 Finding(
                     _finding_key("privileged", event_ids),
@@ -112,13 +127,14 @@ def _findings(events: tuple[CanonicalEvent, ...]) -> tuple[Finding, ...]:
                     event_ids,
                     "audit annotations identify a privileged workload request",
                     0.99,
-                    ("T1610", "T1611"),
+                    finding_techniques,
                 )
             )
         if "network:egress" in action or "flow:egress" in action:
             destination = event.attributes.get("destination")
             allowlisted = event.attributes.get("destination_allowlisted") is True
-            if destination and not allowlisted:
+            if destination and not allowlisted and event.attributes.get("exfiltration") is True:
+                finding_techniques = ("T1041",) if "T1041" in techniques_for(event) else ()
                 results.append(
                     Finding(
                         _finding_key("egress", event_ids),
@@ -127,20 +143,18 @@ def _findings(events: tuple[CanonicalEvent, ...]) -> tuple[Finding, ...]:
                         event_ids,
                         f"flow telemetry records outbound transfer to {destination}",
                         0.94,
-                        ("T1041",),
+                        finding_techniques,
                     )
                 )
     return tuple(sorted(results, key=lambda item: (item.event_ids, item.finding_id)))
 
 
 def _components(
-    events: tuple[CanonicalEvent, ...], edges: tuple[Any, ...], findings: tuple[Finding, ...]
+    events: tuple[CanonicalEvent, ...],
+    edges: tuple[CausalEdge, ...],
+    findings: tuple[Finding, ...],
 ) -> tuple[Incident, ...]:
-    interesting = (
-        {event_id for finding in findings for event_id in finding.event_ids}
-        | {edge.source for edge in edges}
-        | {edge.target for edge in edges}
-    )
+    suspicious = {event_id for finding in findings for event_id in finding.event_ids}
     neighbors: dict[str, set[str]] = defaultdict(set)
     incoming: dict[str, int] = defaultdict(int)
     for edge in edges:
@@ -152,7 +166,7 @@ def _components(
     for finding in findings:
         for event_id in finding.event_ids:
             finding_by_event[event_id].append(finding)
-    remaining = set(interesting)
+    remaining = set(suspicious)
     incidents: list[Incident] = []
     while remaining:
         root = min(remaining, key=lambda node: (by_id[node].timestamp, node))
@@ -164,7 +178,7 @@ def _components(
                 continue
             component.add(node)
             queue.extend(sorted(neighbors[node] - component))
-        remaining -= component
+        remaining -= component & suspicious
         ordered_ids = tuple(sorted(component, key=lambda node: (by_id[node].timestamp, node)))
         severity_points = {"low": 8, "medium": 18, "high": 30, "critical": 42}
         points = sum(
@@ -175,11 +189,12 @@ def _components(
         component_edges = [
             edge for edge in edges if edge.source in component and edge.target in component
         ]
-        confidence = (
-            sum(edge.confidence for edge in component_edges) / len(component_edges)
-            if component_edges
-            else 0.5
-        )
+        component_findings = [
+            finding for event_id in component for finding in finding_by_event[event_id]
+        ]
+        confidence_values = [edge.confidence for edge in component_edges]
+        confidence_values.extend(finding.confidence for finding in component_findings)
+        confidence = sum(confidence_values) / len(confidence_values)
         digest = hashlib.sha256("\x00".join(ordered_ids).encode()).hexdigest()[:12]
         incidents.append(
             Incident(
@@ -199,38 +214,78 @@ def _containment(
     findings: tuple[Finding, ...], events: tuple[CanonicalEvent, ...]
 ) -> tuple[dict[str, str], ...]:
     by_id = {event.event_id: event for event in events}
-    actions: dict[str, dict[str, str]] = {}
-    for finding in findings:
+    actions: dict[tuple[str, str], dict[str, str]] = {}
+
+    def add(kind: str, scope: str, action: dict[str, str]) -> None:
+        actions.setdefault((kind, scope), action)
+
+    ordered_findings = sorted(
+        findings,
+        key=lambda finding: (
+            by_id[finding.event_ids[0]].timestamp,
+            finding.event_ids[0],
+            finding.finding_id,
+        ),
+    )
+    for finding in ordered_findings:
         event = by_id[finding.event_ids[0]]
         if "T1098.001" in finding.mitre_techniques:
-            actions["revoke-credential"] = {
-                "priority": "P0",
-                "action": "Disable the newly created credential and invalidate derived sessions",
-                "scope": event.actor,
-                "evidence_event": event.event_id,
-            }
-        if "T1555" in finding.mitre_techniques:
-            actions["rotate-secret"] = {
-                "priority": "P0",
-                "action": "Rotate accessed secrets after confirming dependent service owners",
-                "scope": event.resource,
-                "evidence_event": event.event_id,
-            }
-        if "T1611" in finding.mitre_techniques:
-            actions["isolate-workload"] = {
-                "priority": "P0",
-                "action": "Isolate and preserve the privileged workload before node triage",
-                "scope": event.resource,
-                "evidence_event": event.event_id,
-            }
-        if "T1041" in finding.mitre_techniques:
-            actions["block-egress"] = {
-                "priority": "P1",
-                "action": "Block the evidenced destination and retain flow telemetry",
-                "scope": str(event.attributes.get("destination", event.resource)),
-                "evidence_event": event.event_id,
-            }
-    return tuple(actions[key] for key in sorted(actions))
+            issued = event.attributes.get("issued_credential")
+            scope = issued if isinstance(issued, str) and issued else event.actor
+            add(
+                "revoke-credential",
+                scope,
+                {
+                    "priority": "P0",
+                    "action": (
+                        "Disable the newly created credential and invalidate derived sessions"
+                    ),
+                    "scope": scope,
+                    "evidence_event": event.event_id,
+                },
+            )
+        if "T1555.006" in finding.mitre_techniques:
+            scope = event.resource or event.actor
+            add(
+                "rotate-secret",
+                scope,
+                {
+                    "priority": "P0",
+                    "action": "Rotate accessed secrets after confirming dependent service owners",
+                    "scope": scope,
+                    "evidence_event": event.event_id,
+                },
+            )
+        if finding.title == "Privileged Kubernetes workload created":
+            scope = event.resource or event.actor
+            add(
+                "isolate-workload",
+                scope,
+                {
+                    "priority": "P0",
+                    "action": "Isolate and preserve the privileged workload before node triage",
+                    "scope": scope,
+                    "evidence_event": event.event_id,
+                },
+            )
+        if finding.title == "Egress to a non-allowlisted destination":
+            scope = str(event.attributes.get("destination", event.resource))
+            add(
+                "block-egress",
+                scope,
+                {
+                    "priority": "P1",
+                    "action": "Block the evidenced destination and retain flow telemetry",
+                    "scope": scope,
+                    "evidence_event": event.event_id,
+                },
+            )
+    return tuple(
+        sorted(
+            actions.values(),
+            key=lambda item: (item["priority"], item["action"], item["scope"]),
+        )
+    )
 
 
 def reconstruct(records: Iterable[Mapping[str, Any]]) -> Reconstruction:
@@ -241,19 +296,23 @@ def reconstruct(records: Iterable[Mapping[str, Any]]) -> Reconstruction:
     findings = _findings(events)
     mappings = {event.event_id: techniques_for(event) for event in events if techniques_for(event)}
     incidents = _components(events, edges, findings)
-    compromised_event_ids = {event_id for incident in incidents for event_id in incident.event_ids}
-    compromised = [event for event in events if event.event_id in compromised_event_ids]
+    incident_event_ids = {event_id for incident in incidents for event_id in incident.event_ids}
+    incident_context = [event for event in events if event.event_id in incident_event_ids]
     blast_radius = {
-        "accounts": tuple(sorted({event.account_id for event in compromised if event.account_id})),
-        "actors": tuple(sorted({event.actor for event in compromised})),
-        "credentials": tuple(
-            sorted({event.credential_id for event in compromised if event.credential_id})
+        "accounts": tuple(
+            sorted({event.account_id for event in incident_context if event.account_id})
         ),
-        "resources": tuple(sorted({event.resource for event in compromised if event.resource})),
-        "providers": tuple(sorted({event.provider for event in compromised})),
+        "actors": tuple(sorted({event.actor for event in incident_context})),
+        "credentials": tuple(
+            sorted({event.credential_id for event in incident_context if event.credential_id})
+        ),
+        "resources": tuple(
+            sorted({event.resource for event in incident_context if event.resource})
+        ),
+        "providers": tuple(sorted({event.provider for event in incident_context})),
     }
     return Reconstruction(
-        schema_version="1.0",
+        schema_version=RECONSTRUCTION_SCHEMA_VERSION,
         generated_at=timestamp_text(datetime.now(timezone.utc)),
         input_sha256=_input_digest(materialized),
         events=events,

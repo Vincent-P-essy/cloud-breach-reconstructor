@@ -1,13 +1,15 @@
 from __future__ import annotations
 
+import csv
 import hashlib
 import json
 import tempfile
 import unittest
 from pathlib import Path
 
-from cloud_breach_reconstructor.benchmark import _percentile, benchmark
+from cloud_breach_reconstructor.benchmark import QUALITY_METRICS, _percentile, benchmark
 from cloud_breach_reconstructor.engine import reconstruct
+from cloud_breach_reconstructor.errors import EvidenceError
 from cloud_breach_reconstructor.reporting import (
     executive_markdown,
     graph_dot,
@@ -15,7 +17,17 @@ from cloud_breach_reconstructor.reporting import (
     write_bundle,
 )
 
-from .helpers import lab_records, lab_truth
+from .helpers import canonical, lab_records, lab_truth
+
+
+def empty_truth():
+    return {
+        "schema_version": "1.1",
+        "causal_edges": [],
+        "findings": [],
+        "attack_event_ids": [],
+        "techniques": [],
+    }
 
 
 class ReportingBenchmarkTests(unittest.TestCase):
@@ -25,6 +37,8 @@ class ReportingBenchmarkTests(unittest.TestCase):
         self.assertEqual(1.0, result["metrics"]["causal_edge_precision"])
         self.assertEqual(1.0, result["metrics"]["causal_edge_recall"])
         self.assertEqual(0.0, result["metrics"]["false_link_rate"])
+        self.assertTrue(all(result["metrics"][name] == 1.0 for name in QUALITY_METRICS))
+        self.assertTrue(all(not values for values in result["false_positives"].values()))
 
     def test_benchmark_invalid_iteration_count(self) -> None:
         for value in (0, 1001):
@@ -32,9 +46,39 @@ class ReportingBenchmarkTests(unittest.TestCase):
                 benchmark([], {}, iterations=value)
 
     def test_empty_truth_metrics_are_defined(self) -> None:
-        result = benchmark([], {}, iterations=1)
+        result = benchmark([], empty_truth(), iterations=1)
         self.assertEqual(1.0, result["metrics"]["causal_edge_precision"])
         self.assertEqual(1.0, result["metrics"]["technique_recall"])
+
+    def test_false_findings_events_and_techniques_are_penalized(self) -> None:
+        record = canonical(
+            "false-positive",
+            "2026-07-12T10:00:00Z",
+            action="secretsmanager:GetSecretValue",
+        )
+        result = benchmark([record], empty_truth(), iterations=1)
+        self.assertEqual(0.0, result["metrics"]["finding_precision"])
+        self.assertEqual(0.0, result["metrics"]["attack_event_precision"])
+        self.assertEqual(0.0, result["metrics"]["technique_precision"])
+        self.assertEqual(1, result["error_counts"]["finding"]["false_positives"])
+
+    def test_edge_kind_is_part_of_ground_truth(self) -> None:
+        records = [
+            canonical("a", "2026-07-12T10:00:00Z", session_id="same"),
+            canonical("b", "2026-07-12T10:01:00Z", session_id="same"),
+        ]
+        truth = empty_truth()
+        truth["causal_edges"] = [{"source": "a", "target": "b", "kind": "explicit-parent"}]
+        result = benchmark(records, truth, iterations=1)
+        self.assertEqual(0.0, result["metrics"]["causal_edge_precision"])
+        self.assertEqual(0.0, result["metrics"]["causal_edge_recall"])
+        self.assertEqual(1, result["error_counts"]["causal_edge"]["false_positives"])
+        self.assertEqual(1, result["error_counts"]["causal_edge"]["false_negatives"])
+
+    def test_ground_truth_schema_fails_closed(self) -> None:
+        for truth in ({}, {**empty_truth(), "schema_version": "999"}):
+            with self.subTest(truth=truth), self.assertRaises(EvidenceError):
+                benchmark([], truth, iterations=1)
 
     def test_percentile(self) -> None:
         self.assertEqual(0.0, _percentile([], 0.95))
@@ -59,6 +103,33 @@ class ReportingBenchmarkTests(unittest.TestCase):
         dot = graph_dot(report)
         self.assertEqual(len(report.edges), dot.count(" -> "))
         self.assertTrue(dot.endswith("}\n"))
+
+        injected = 'x"; evil [label="INJECTED"]; "tail'
+        hostile = graph_dot(reconstruct([canonical(injected, "2026-07-12T10:00:00Z")]))
+        self.assertNotIn('"x"; evil', hostile)
+        self.assertIn('\\"; evil', hostile)
+
+    def test_markdown_and_csv_neutralize_active_content(self) -> None:
+        report = reconstruct(
+            [
+                canonical(
+                    "=cmd|' /C calc'!A0",
+                    "2026-07-12T10:00:00Z",
+                    actor="|<img src=x onerror=alert(1)>",
+                    action="@SUM(1+1)",
+                )
+            ]
+        )
+        markdown = technical_markdown(report)
+        self.assertIn("&#124;&lt;img", markdown)
+        self.assertNotIn("<img", markdown)
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory)
+            write_bundle(report, output)
+            with (output / "timeline.csv").open(encoding="utf-8", newline="") as stream:
+                rows = list(csv.reader(stream))
+            self.assertTrue(rows[1][0].startswith("'="))
+            self.assertTrue(rows[1][4].startswith("'@"))
 
     def test_bundle_manifest_binds_all_artifacts(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

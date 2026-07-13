@@ -4,10 +4,10 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "cloud-breach-reconstructor"
-version = "0.1.0"
+version = "0.2.0"
 description = "Evidence-first causal reconstruction of cloud security incidents"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.10,<3.13"
 license = {text = "MIT"}
 authors = [{name = "Vincent Plessy"}]
 classifiers = [
@@ -31,7 +31,7 @@ package-dir = {"" = "src"}
 where = ["src"]
 
 [tool.setuptools.package-data]
-cloud_breach_reconstructor = ["web/*"]
+cloud_breach_reconstructor = ["web/*", "data/*"]
 
 [tool.ruff]
 line-length = 100

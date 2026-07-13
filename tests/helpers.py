@@ -17,6 +17,7 @@ def lab_truth():
 
 def canonical(event_id: str, timestamp: str, **overrides):
     value = {
+        "schema_version": "1.0",
         "provider": "aws",
         "event_id": event_id,
         "timestamp": timestamp,

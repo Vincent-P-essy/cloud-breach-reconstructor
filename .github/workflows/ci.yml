@@ -65,3 +65,29 @@ jobs:
           cloud-breach-reconstructor:ci
           python -m cloud_breach_reconstructor benchmark datasets/lab/events.jsonl
           --truth datasets/lab/ground-truth.json --iterations 5 --fail-under 1.0
+
+  package:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements-build.lock
+      - name: Build wheel and source distribution
+        run: |
+          python -m pip install --disable-pip-version-check -r requirements-build.lock
+          python -m build --no-isolation
+      - name: Test installed wheel outside the repository
+        run: |
+          python -m venv /tmp/cloud-breach-wheel
+          /tmp/cloud-breach-wheel/bin/python -m pip install --disable-pip-version-check --no-deps dist/*.whl
+          /tmp/cloud-breach-wheel/bin/python scripts/installed_smoke.py
+      - name: Test source distribution contents
+        run: |
+          mkdir /tmp/cloud-breach-sdist
+          tar -xzf dist/*.tar.gz -C /tmp/cloud-breach-sdist
+          cd /tmp/cloud-breach-sdist/cloud_breach_reconstructor-*
+          PYTHONPATH=src python -m unittest discover -s tests -t .

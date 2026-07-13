@@ -4,7 +4,7 @@ from dataclasses import dataclass
 
 from .models import CanonicalEvent
 
-ATTACK_KNOWLEDGE_DATE = "2026-07-12"
+ATTACK_KNOWLEDGE_DATE = "2026-07-13"
 
 
 @dataclass(frozen=True, slots=True)
@@ -26,12 +26,14 @@ RULES: tuple[AttackRule, ...] = (
         "T1526", "Cloud Service Discovery", ("describ", "listclusters", "subscriptions/read")
     ),
     AttackRule(
-        "T1555", "Credentials from Password Stores", ("getsecret", "secrets/read", "get:secrets")
+        "T1555.006",
+        "Cloud Secrets Management Stores",
+        ("getsecret", "secrets/read", "get:secrets"),
     ),
     AttackRule("T1610", "Deploy Container", ("create:pods", "deployments/write", "runpod")),
     AttackRule("T1611", "Escape to Host", ("privilegedpod", "hostpath", "nodes/proxy")),
     AttackRule("T1530", "Data from Cloud Storage", ("getobject", "blob/read", "downloadobject")),
-    AttackRule("T1041", "Exfiltration Over C2 Channel", ("network:egress", "flow:egress")),
+    AttackRule("T1041", "Exfiltration Over C2 Channel", ("c2:egress", "exfiltration:c2")),
     AttackRule(
         "T1562.001", "Impair Defenses", ("stoplogging", "deleteaudit", "diagnosticsettings/delete")
     ),
@@ -39,12 +41,22 @@ RULES: tuple[AttackRule, ...] = (
 
 
 def techniques_for(event: CanonicalEvent) -> tuple[str, ...]:
+    if event.outcome != "success":
+        return ()
     action = event.action.casefold().replace(" ", "")
     matches = {
         rule.technique_id for rule in RULES if any(term in action for term in rule.action_terms)
     }
-    if event.attributes.get("privileged") is True:
+    host_path = event.attributes.get("host_path")
+    host_escape_evidence = event.attributes.get("host_escape") is True or (
+        event.attributes.get("privileged") is True
+        and isinstance(host_path, str)
+        and host_path in {"/", "/proc", "/sys", "/var/run/docker.sock"}
+    )
+    if host_escape_evidence:
         matches.add("T1611")
+    if event.attributes.get("exfiltration") is True and event.attributes.get("c2_channel") is True:
+        matches.add("T1041")
     return tuple(sorted(matches))
 
 

@@ -1,2 +1,6 @@
 # Exact build backend used by CI and isolated packaging checks.
+build==1.3.0
+packaging==25.0
+pyproject_hooks==1.2.0
 setuptools==75.8.0
+wheel==0.45.1

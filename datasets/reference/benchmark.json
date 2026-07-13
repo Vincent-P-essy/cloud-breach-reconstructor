@@ -1,27 +1,75 @@
 {
   "counts": {
+    "actual_attack_events": 13,
     "actual_edges": 16,
+    "actual_findings": 10,
+    "actual_techniques": 8,
     "events": 21,
+    "expected_attack_events": 13,
     "expected_edges": 16,
-    "findings": 10,
+    "expected_findings": 10,
+    "expected_techniques": 8,
     "incidents": 2
   },
   "deterministic": true,
-  "functional_sha256": "07cffb2a9cd118f9692d28c61650177d6732227c99e61aedaec3f448c126c808",
+  "error_counts": {
+    "attack_event": {
+      "false_negatives": 0,
+      "false_positives": 0,
+      "true_positives": 13
+    },
+    "causal_edge": {
+      "false_negatives": 0,
+      "false_positives": 0,
+      "true_positives": 16
+    },
+    "finding": {
+      "false_negatives": 0,
+      "false_positives": 0,
+      "true_positives": 10
+    },
+    "technique": {
+      "false_negatives": 0,
+      "false_positives": 0,
+      "true_positives": 8
+    }
+  },
+  "false_negatives": {
+    "attack_event_ids": [],
+    "causal_edges": [],
+    "findings": [],
+    "techniques": []
+  },
+  "false_positives": {
+    "attack_event_ids": [],
+    "causal_edges": [],
+    "findings": [],
+    "techniques": []
+  },
+  "functional_sha256": "a87e29e5d4bd87a89e1c0fcc521fb85b31131fe9c6e54b80371c99db55a28990",
+  "ground_truth_schema_version": "1.1",
   "iterations": 100,
   "latency_is_environment_dependent": true,
   "latency_ms": {
-    "max": 1.9076,
-    "median": 1.4457,
-    "min": 1.4023,
-    "p95": 1.7424
+    "max": 3.4256,
+    "median": 1.5833,
+    "min": 1.3525,
+    "p95": 2.8672
   },
   "metrics": {
+    "attack_event_false_positive_rate": 0.0,
+    "attack_event_precision": 1.0,
     "attack_event_recall": 1.0,
+    "causal_edge_false_positive_rate": 0.0,
     "causal_edge_precision": 1.0,
     "causal_edge_recall": 1.0,
     "false_link_rate": 0.0,
+    "finding_false_positive_rate": 0.0,
+    "finding_precision": 1.0,
+    "finding_recall": 1.0,
+    "technique_false_positive_rate": 0.0,
+    "technique_precision": 1.0,
     "technique_recall": 1.0
   },
-  "schema_version": "1.0"
+  "schema_version": "1.1"
 }
