@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>Cloud Breach Reconstructor</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <header>
+    <div><span class="eyebrow">EVIDENCE-FIRST / DETERMINISTIC</span><h1>Cloud Breach Reconstructor</h1></div>
+    <button id="refresh" type="button">Reconstruct reference incident</button>
+  </header>
+  <main>
+    <section class="hero">
+      <p>Typed causal links, exposed confidence, no LLM in the causality path.</p>
+      <div id="status" class="status">Loading reference evidence…</div>
+    </section>
+    <section id="metrics" class="metrics" aria-label="Incident metrics"></section>
+    <section class="grid">
+      <article><h2>Evidence timeline</h2><div id="timeline" class="timeline"></div></article>
+      <article><h2>Blast radius</h2><div id="blast"></div><h2>Containment</h2><div id="containment"></div></article>
+    </section>
+    <section><h2>Causal graph</h2><div id="edges" class="edges"></div></section>
+  </main>
+  <footer>All relationships remain analytical hypotheses. Preserve source logs for forensic review.</footer>
+  <script src="/app.js" defer></script>
+</body>
+</html>

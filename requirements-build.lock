@@ -1,0 +1,2 @@
+# Exact build backend used by CI and isolated packaging checks.
+setuptools==75.8.0

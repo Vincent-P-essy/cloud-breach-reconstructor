@@ -1,0 +1,27 @@
+{
+  "counts": {
+    "actual_edges": 16,
+    "events": 21,
+    "expected_edges": 16,
+    "findings": 10,
+    "incidents": 2
+  },
+  "deterministic": true,
+  "functional_sha256": "07cffb2a9cd118f9692d28c61650177d6732227c99e61aedaec3f448c126c808",
+  "iterations": 100,
+  "latency_is_environment_dependent": true,
+  "latency_ms": {
+    "max": 1.9076,
+    "median": 1.4457,
+    "min": 1.4023,
+    "p95": 1.7424
+  },
+  "metrics": {
+    "attack_event_recall": 1.0,
+    "causal_edge_precision": 1.0,
+    "causal_edge_recall": 1.0,
+    "false_link_rate": 0.0,
+    "technique_recall": 1.0
+  },
+  "schema_version": "1.0"
+}

@@ -1,0 +1,30 @@
+{
+  "schema_version": "1.0",
+  "scenario_id": "cross-cloud-credential-to-workload-breach",
+  "causal_edges": [
+    {"source": "e01", "target": "e02"},
+    {"source": "e02", "target": "e03"},
+    {"source": "e03", "target": "e04"},
+    {"source": "e04", "target": "e05"},
+    {"source": "e05", "target": "e06"},
+    {"source": "e06", "target": "e07"},
+    {"source": "e07", "target": "e08"},
+    {"source": "e08", "target": "k01"},
+    {"source": "k01", "target": "k02"},
+    {"source": "k01", "target": "k03"},
+    {"source": "k02", "target": "k03"},
+    {"source": "k03", "target": "k04"},
+    {"source": "az01", "target": "az02"},
+    {"source": "az02", "target": "az03"},
+    {"source": "az03", "target": "az04"},
+    {"source": "az04", "target": "az05"}
+  ],
+  "attack_event_ids": [
+    "e01", "e02", "e03", "e05", "e06", "e07", "k01", "k02", "k04",
+    "az01", "az02", "az04", "az05"
+  ],
+  "techniques": [
+    "T1041", "T1078", "T1087.004", "T1098.001", "T1526", "T1555", "T1610", "T1611"
+  ],
+  "notes": "Synthetic labels cover only the explicitly modeled causal hypotheses; timestamps and addresses are documentation-only."
+}
