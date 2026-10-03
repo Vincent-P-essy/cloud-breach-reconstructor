@@ -9,11 +9,11 @@ The language-model boundary is deliberate: **no LLM decides causality, ATT&CK
 mapping, blast radius, or containment**. A language model may later rewrite the
 deterministic JSON into prose, but it cannot add events or relationships.
 
-## Running example
+## Dashboard Preview
 
-![cloud-breach-reconstructor running locally](docs/screenshots/application.png)
+![Reference incident reconstruction, findings and timeline](docs/screenshots/dashboard-overview.png)
 
-The reconstructed attack timeline and evidence links from the reference cloud-log dataset. [Commands and test results](docs/verification.md).
+Local reconstruction of the bundled reference incident. The timeline and findings come from the repository fixtures.
 
 ## Measured reference incident
 
